@@ -7,14 +7,14 @@ on Sarah Rudd's original 2011 concept.
 
 Library code only: pure functions for building the zone-level
 shot/move statistics and solving the iterative Markov-chain fixed
-point. The actual data-pulling pipeline lives in
+point. The training/data-pulling pipeline lives in
 scripts/build_xt_grid.py, not here.
 """
 
 import numpy as np
 import pandas as pd
 
-from src.analytics.xg_model import _shot_distance, _shot_angle, predict_xg
+from src.analytics.xg_model import prepare_shot_features, predict_xg
 
 PITCH_LENGTH, PITCH_WIDTH = 120, 80
 N_COLS, N_ROWS = 16, 12
@@ -36,14 +36,22 @@ def build_move_and_shot_data(all_events: pd.DataFrame, xg_model, include_turnove
     From raw events across many matches, compute the zone-level statistics
     needed to solve for xT.
 
-    If include_turnovers=False (original behavior): only shots and completed
-    moves are counted, so shot_prob + move_prob = 1 per zone. Turnovers are
+    If include_turnovers=False (default): only shots and completed moves
+    are counted, so shot_prob + move_prob = 1 per zone. Turnovers are
     implicitly excluded from the denominator entirely.
 
-    If include_turnovers=True: failed passes/dispossessions are also counted
-    in the denominator, so shot_prob + move_prob + turnover_prob = 1 per zone,
-    with turnover_value fixed at 0 (losing the ball ends this possession's
-    attacking value).
+    If include_turnovers=True: failed passes/dispossessions are also
+    counted in the denominator, so shot_prob + move_prob + turnover_prob = 1
+    per zone, with turnover_value fixed at 0 (losing the ball ends this
+    possession's attacking value — the simplest defensible assumption;
+    see README for the documented next step of a negative, opponent-xT-based
+    turnover value).
+
+    Shot features/values are computed via the shared xG feature-extraction
+    function (src/analytics/xg_model.py), not duplicated here, so xG and xT
+    always agree on what a shot's features are. `xg_model` must be the
+    artifact dict saved by scripts/train_xg_model.py
+    ({"model":..., "feature_names":..., "penalty_xg":...}).
     """
     all_actions = (
         all_events[all_events["event_type"].isin(["Pass", "Carry", "Shot"])]
@@ -59,24 +67,22 @@ def build_move_and_shot_data(all_events: pd.DataFrame, xg_model, include_turnove
         all_actions["x"].to_numpy(), all_actions["y"].to_numpy()
     )
 
-    if include_turnovers:
-        denom_mask = pd.Series(True, index=all_actions.index)  # everything counts
-    else:
-        denom_mask = is_shot | is_completed_move  # original behavior
-
+    denom_mask = pd.Series(True, index=all_actions.index) if include_turnovers else (is_shot | is_completed_move)
     actions = all_actions[denom_mask].copy()
+
     total_per_zone = (
         actions.groupby(["col", "row"]).size().reindex(FULL_ZONE_INDEX, fill_value=0)
     )
 
-    shots = all_actions[is_shot].copy()
-    shots["distance"] = _shot_distance(shots["x"], shots["y"])
-    shots["angle"] = _shot_angle(shots["x"], shots["y"])
+    # --- shots: via the shared xG feature-extraction function ---
+    shots = prepare_shot_features(all_events, include_penalties=False)
+    shots["col"], shots["row"] = _zone_index(shots["x"].to_numpy(), shots["y"].to_numpy())
     shots["xg"] = predict_xg(xg_model, shots)
 
     shots_per_zone = shots.groupby(["col", "row"]).size().reindex(FULL_ZONE_INDEX, fill_value=0)
     shot_value = shots.groupby(["col", "row"])["xg"].mean().reindex(FULL_ZONE_INDEX, fill_value=0)
 
+    # --- moves: destination zone + transition counts ---
     moves = all_actions[is_completed_move].copy()
     moves["end_col"], moves["end_row"] = _zone_index(
         moves["end_x"].fillna(moves["x"]).to_numpy(),
@@ -101,7 +107,7 @@ def build_move_and_shot_data(all_events: pd.DataFrame, xg_model, include_turnove
         turnover_counts = turnovers.groupby(["col", "row"]).size().reindex(FULL_ZONE_INDEX, fill_value=0)
         turnover_prob = (turnover_counts / total_per_zone).fillna(0)
         result["turnover_prob"] = turnover_prob
-        result["turnover_value"] = 0.0  # simplest version — extend later if useful
+        result["turnover_value"] = 0.0  # simplest version — see README future work
 
     return result
 
@@ -116,17 +122,19 @@ def compute_xt_grid(
     fixed point (Singh, 2018): start all zones at 0, then repeatedly
     recompute each zone's value using the previous iteration's values
     for reachable destination zones, stopping once the grid stabilizes
-    (max change between iterations drops below `tolerance`), rather
-    than assuming a fixed iteration count is always enough.
+    (max change between iterations drops below `tolerance`).
 
     xT[zone] = shot_prob[zone] * shot_value[zone]
              + move_prob[zone] * sum_over_destinations( P(dest | zone) * xT[dest] )
+             + turnover_prob[zone] * turnover_value   [only if include_turnovers was used]
     """
     shot_prob = data["shot_prob"]
     shot_value = data["shot_value"]
     move_prob = data["move_prob"]
     move_counts = data["move_counts"]
     transition_counts = data["transition_counts"]
+    turnover_prob = data.get("turnover_prob")  # None if include_turnovers=False
+    turnover_value = data.get("turnover_value", 0.0)
 
     xt = np.zeros((N_COLS, N_ROWS))
     max_change = float("inf")
@@ -139,6 +147,7 @@ def compute_xt_grid(
                 sp = shot_prob.get((col, row), 0.0)
                 sv = shot_value.get((col, row), 0.0)
                 mp = move_prob.get((col, row), 0.0)
+                tp = turnover_prob.get((col, row), 0.0) if turnover_prob is not None else 0.0
                 total_moves = move_counts.get((col, row), 0)
 
                 move_value = 0.0
@@ -147,13 +156,13 @@ def compute_xt_grid(
                         dests = transition_counts.loc[(col, row)]
                     except KeyError:
                         dests = None
-
                     if dests is not None:
                         for (end_col, end_row), count in dests.items():
                             prob = count / total_moves
                             move_value += prob * xt[end_col, end_row]
 
-                xt_new[col, row] = sp * sv + mp * move_value + data.get("turnover_prob", pd.Series(dtype=float)).get((col, row), 0.0) * data.get("turnover_value", 0.0)
+                xt_new[col, row] = sp * sv + mp * move_value + tp * turnover_value
+
         max_change = np.abs(xt_new - xt).max()
         xt = xt_new
 

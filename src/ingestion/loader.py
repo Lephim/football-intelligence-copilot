@@ -88,6 +88,7 @@ def load_events(match_id: int) -> pd.DataFrame:
 
         rows.append({
             "event_id": r.get("id"),
+            "event_index": r.get("index"),
             "match_id": match_id,
             "minute": r.get("minute"),
             "second": r.get("second"),
