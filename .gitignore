@@ -1,18 +1,13 @@
-# .gitignore
+# .gitignore — updated patterns
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
-# data — don't commit raw/cached match data, it's regenerable from StatsBomb
-data/raw/
-data/processed/
+# data — match at ANY depth, not just repo root
+**/data/raw/
+**/data/processed/
 
-# environment
 .python-version
 *.egg-info/
-
-# OS
 .DS_Store
-
-# jupyter
-.ipynb_checkpoints
+.vscode/

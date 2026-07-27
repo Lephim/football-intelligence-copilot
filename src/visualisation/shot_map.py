@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from mplsoccer import Pitch
 
-from analytics.xg_model import prepare_shot_features, predict_xg
+from src.analytics.xg_model import prepare_shot_features, predict_xg
 from pathlib import Path
 from src.visualisation.theme import BG_COLOR, LINE_COLOR, ACCENT_GOLD, ACCENT_TEAL, TEXT_COLOR, apply_theme
 

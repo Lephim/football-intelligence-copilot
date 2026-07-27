@@ -1,6 +1,7 @@
 import pandas as pd
 from mplsoccer import Pitch
 from src.visualisation.theme import BG_COLOR, LINE_COLOR, ACCENT_GOLD, ACCENT_TEAL, TEXT_COLOR, apply_theme
+import matplotlib.patheffects as pe  # add this import at the top of the file
 
 apply_theme()
 
@@ -49,10 +50,14 @@ def plot_pass_network(node_positions, edge_counts, title=""):
         s=600, color=ACCENT_GOLD, edgecolors=BG_COLOR, linewidth=1.5, ax=ax, zorder=2
     )
 
+
     for player, row in node_positions.iterrows():
         ax.annotate(
-            player.split()[-1], (row["x"], row["y"]),
-            ha="center", va="center", fontsize=8, color=BG_COLOR, fontweight="bold", zorder=3
+            player.split()[-1],
+            (row["x"], row["y"]),
+            ha="center", va="center", fontsize=9, fontweight="medium",
+            color=TEXT_COLOR, zorder=3,
+            path_effects=[pe.withStroke(linewidth=2.5, foreground=BG_COLOR)],
         )
 
     ax.set_title(title, color=TEXT_COLOR, fontsize=14)
